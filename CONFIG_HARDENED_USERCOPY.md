@@ -30,3 +30,149 @@ You can find a brief history of efforts and discussions that have been made
 history of the changes in the Linux source code available
 [here](https://lore.kernel.org/lkml/20170628165520.GA129364@gmail.com/t/) and
 [here](https://groups.google.com/g/linux.kernel/c/y9Dgu5HD1bg?pli=1).
+
+## Reading the Kernel Sources
+
+To understand how it works, we read through the implementation in aid of the
+text linked above.
+
+**Configuration**
+
+Let's first look at how the configuration `CONFIG_HARDENED_USERCOPY` enables the
+check in linux-6.4.8.
+
+The main part of implementation can be fouond at `mm/usercopy.c`. Starting from
+the bottom, `bypass_usercopy_checks` is used locally to determine whether the
+checks should be performed. Note that because `CONFIG_HARDENED_USERCOPY=y` is
+the default configuration on all architectures, `bypass_usercopy_checks` is more
+likely to be false. So to utilize branch prediction,
+`static_branch_unlikely(&bypass_usercopy_checks)` is used in the condition that
+determines if the check is needed in `__check_object_size`.
+
+**Implementation in the Kernel Headers**
+
+Before we dig into the implementation of the checks themselves, let's see how
+and where the checks are utilized. `__check_object_size` handles all the checks
+needed. It is the entry point to the meat of hardened usercopy from the kernel.
+The API to access it is implemented in `include/linux/thread_info.h`, where we
+can find two wrapper functions `check_object_size` and `check_copy_size`.
+
+The checks are added in the shared kernel header `include/linux/uaccess.h`.
+According to this comment:
+```c
+/* 
+ * Architectures should provide two primitives (raw_copy_{to,from}_user())
+ * and get rid of their private instances of copy_{to,from}_user() and
+ * __copy_{to,from}_user{,_inatomic}().
+ * 
+ * ...
+ * /
+```
+
+This makes the checks available to all architectures, and each architecture only
+needs to implement the `raw_copy_{to,from}_user` functions, which is wrapped by
+the checks.
+
+`check_object_size` is a very thin wrapper on top of `__check_object_size`, with
+an optimization that skips the check if `n`, the size of the memory object, is
+constant and known during compilation. This exempts trusted calls from overflow
+protection.
+
+The main difference between the two is that `check_object_size` is used in the
+inlined `__copy_{to,from}_user_inatomic()` variants, and `check_copy_size` is
+used in the *optionally* inlined `_copy_{to,from}_user` functions depending on
+the architecture. Note that `check_copy_size` is also used in
+`copy_{from,to}_iter` and `copy_from_iter_nocache`, which are I/O related
+functions that copy data to the kernel-space memory, so it makes sense to do the
+boundary checks there as well.
+
+**Logistics of the checks**
+
+`__check_object_size` takes a pointer `ptr` inside the kernel-space memory, the
+size `n` of the object to be copied, and a flag `to_user` indicating the
+direction of the copy. As of 6.4.8, four checks are implemented. They are
+executed in the following order:
+- `check_bogus_address`
+- `check_stack_object`
+- `check_heap_object`
+- `check_kernel_text_object`
+
+`check_bogus_address` is obvious. It checks if the given pointer wraps around
+the end of memory (i.e.: `ptr + (n - 1) < ptr`), if the pointer is NULL or
+zero-sized.
+
+`check_stack_object` performs a check and returns one of the four possible
+results:
+```c
+/*
+ * ...
+ *
+ * Returns:
+ *  NOT_STACK: not at all on the stack
+ *  GOOD_FRAME: fully within a valid stack frame
+ *  GOOD_STACK: within the current stack (when can't frame-check exactly)
+ *  BAD_STACK: error condition (invalid stack position or bad stack frame)
+ */
+```
+It accesses `task_stack_page` to get the size of the current thread, and first
+check if the pointer is actually pointing inside the stack. If not, it returns
+`NOT_STACK`. `BAD_STACK` is returned if the object partially overlaps. And
+optionally, if the information is available in the current architecture, it
+performs a check on the stack frame. It is specifically implemented and improved
+in the [x86](https://lwn.net/Articles/697545/) architecture to enhance the
+completeness of the check. Interestingly, the only other modern architecture
+that supports this at the time of writing is powerpc. There was a
+[complaint](https://www.openwall.com/lists/kernel-hardening/2020/08/18/1) about
+this in 2020. Another optional check depends on
+`CONFIG_ARCH_HAS_CURRENT_STACK_POINTER` (enabled on mips) when the stack frame
+check is not available. It works by merely checking if the address is on the
+stack.
+
+`check_heap_object` first checks if the address is within a high-memory page
+that is temporarily mapped to the kernel virtual memory. It then checks if the
+address is allocated via `vmalloc`, which allocates virtually contiguous
+addresses, making sure that the object does not cross the end of the allocated
+vmap_area. Only after that, it checks if the address is inside virtual memory,
+if not so, it simply returns and moves on to the other check; otherwise, it
+converts the pointed address from virtual memory to a folio. It checks if the
+folio is a slab or a large folio, and checks correspondingly. If the folio is
+neither, no additional checks are performed. I cannot tell for sure if there are
+other cases of folio a check would be worthwhile, but slabs and large folio
+happen to be the ones that are checked for. Some contextual information from
+[here](https://lwn.net/Articles/695991/) might be useful to understand the
+motive:
+
+> Beyond that, if the kernel-space address points to an object that has been
+> allocated from the slab allocator, the patches ensure that what is being
+> copied fits within the size of the object allocated. This check is performed
+> by calling PageSlab() on the kernel address to see if it lies within a page
+> that is handled by the slab allocator; it then calls an allocator-specific
+> routine to determine whether the amount of data to be copied is fully within
+> an allocated object. If the address range is not handled by the slab
+> allocator, the patches will test that it is either within a single or compound
+> page and that it does not span independently allocated pages.
+
+
+`check_kernel_text_object` is the final check that is performed. It first
+determines if the object overlaps with the kernel text. Given the start
+(`_stext`) and end (`_etext`) location of the kernel text, the check is
+straightforward. Additionally, there is a caveat explained in the comments:
+```c
+/*
+* Some architectures have virtual memory mappings with a secondary
+* mapping of the kernel text, i.e. there is more than one virtual
+* kernel address that points to the kernel image. It is usually
+* when there is a separate linear physical memory mapping, in that
+* __pa() is not just the reverse of __va(). This can be detected
+* and checked:
+*/
+```
+When this is the case, the same check is performed, but on the secondary
+mapping.
+
+**Error handling**
+
+There is a helper function named `usercopy_abort`, whose responsibility is
+printing an emergency-level message noting the out-of-bounds access, and call
+[`BUG()`](https://kernelnewbies.org/FAQ/BUG) to indicate that something is
+seriously wrong and kill the process.
