@@ -36,36 +36,34 @@ Before start investigating the source code for this patch, let's have an
 introduction to user space and kernel space.
 
 
-- **User Space**
-User space is the memory area where user-level applications and processes run.
-This is where most of the user's programs, such as web browsers, text editors,
-games, and other applications, execute. User space applications interact
-directly with the user and handle various tasks based on the user's input. In
-user space, programs are executed in a restricted environment with limited
-privileges. This means they cannot access or modify critical system resources
-directly, such as hardware devices or low-level system memory. Instead, they
-have to make system calls to the operating system kernel to request access to
-these resources. User space offers better isolation between different
-applications, ensuring that a malfunction or crash in one program does not
-affect others. It also provides a level of security, as user space processes are
-unable to compromise the integrity of the operating system or other processes
-directly.
+- **User Space** is the memory area where user-level applications and processes
+run. This is where most of the user's programs, such as web browsers, text
+editors, games, and other applications, execute. User space applications
+interact directly with the user and handle various tasks based on the user's
+input. In user space, programs are executed in a restricted environment with
+limited privileges. This means they cannot access or modify critical system
+resources directly, such as hardware devices or low-level system memory.
+Instead, they have to make system calls to the operating system kernel to
+request access to these resources. User space offers better isolation between
+different applications, ensuring that a malfunction or crash in one program does
+not affect others. It also provides a level of security, as user space processes
+are unable to compromise the integrity of the operating system or other
+processes directly.
 
-- **Kernel Space**
-Kernel space, also known as supervisor mode or system space, is a privileged
-memory area reserved for the operating system's core functions. It contains the
-kernel, which is the heart of the operating system responsible for managing
-hardware, memory, file systems, and various system services. The kernel operates
-at a higher privilege level than user space processes. It has direct access to
-system resources, hardware, and low-level memory. This access allows it to
-perform critical tasks that require deep system integration, such as controlling
-device drivers, managing memory, scheduling processes, and handling interrupts.
-Since the kernel operates at a higher privilege level, it must be protected from
-user space processes to maintain system stability and security. Accidental or
-malicious access to kernel space by user space applications could lead to system
-crashes, data corruption, or security breaches. Therefore, modern operating
-systems implement mechanisms, such as memory protection, to prevent unauthorized
-access from user space to kernel space.
+- **Kernel Space**, also known as supervisor mode or system space, is a
+privileged memory area reserved for the operating system's core functions. It
+contains the kernel, which is the heart of the operating system responsible for
+managing hardware, memory, file systems, and various system services. The kernel
+operates at a higher privilege level than user space processes. It has direct
+access to system resources, hardware, and low-level memory. This access allows
+it to perform critical tasks that require deep system integration, such as
+controlling device drivers, managing memory, scheduling processes, and handling
+interrupts. Since the kernel operates at a higher privilege level, it must be
+protected from user space processes to maintain system stability and security.
+Accidental or malicious access to kernel space by user space applications could
+lead to system crashes, data corruption, or security breaches. Therefore, modern
+operating systems implement mechanisms, such as memory protection, to prevent
+unauthorized access from user space to kernel space.
 
 In summary, user space is the area where user-level applications run, operating
 in a restricted environment with limited privileges, while kernel space is a
