@@ -32,7 +32,7 @@ history of the changes in the Linux source code available
 [here](https://groups.google.com/g/linux.kernel/c/y9Dgu5HD1bg?pli=1).
 
 
-Before start investigating the source code for this patch, let's have an
+Before starting to investigate the source code for this patch, let's have an
 introduction to user space and kernel space.
 
 
@@ -158,10 +158,10 @@ static inline void check_bogus_address(const unsigned long ptr, unsigned long n,
 
 `check_stack_object` performs a check and returns one of the four possible
 results:
-`NOT_STACK`: not at all on the stack
-`GOOD_FRAME`: fully within a valid stack frame
-`GOOD_STACK`: within the current stack (when can't frame-check exactly)
-`BAD_STACK`: error condition (invalid stack position or bad stack frame)
+`NOT_STACK`: not at all on the stack <br>
+`GOOD_FRAME`: fully within a valid stack frame <br>
+`GOOD_STACK`: within the current stack (when can't frame-check exactly) <br>
+`BAD_STACK`: error condition (invalid stack position or bad stack frame) <br>
 
 ```c
 static noinline int check_stack_object(const void *obj, unsigned long len)
