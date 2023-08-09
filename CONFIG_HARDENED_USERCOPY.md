@@ -157,7 +157,7 @@ static inline void check_bogus_address(const unsigned long ptr, unsigned long n,
 ```
 
 `check_stack_object` performs a check and returns one of the four possible
-results:
+results: <br>
 `NOT_STACK`: not at all on the stack <br>
 `GOOD_FRAME`: fully within a valid stack frame <br>
 `GOOD_STACK`: within the current stack (when can't frame-check exactly) <br>
