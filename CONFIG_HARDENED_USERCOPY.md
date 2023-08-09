@@ -14,34 +14,65 @@ intended boundaries.
 
 Some of the security enhancements provided by `CONFIG_HARDENED_USERCOPY` may
 include:
-- *Checking for valid memory regions* <br>
+- **Checking for valid memory regions**
 The kernel checks whether the memory addresses provided during copy operations
 are valid user or kernel addresses to prevent unauthorized access.
-- *Boundary checks* <br>
+- **Boundary checks**
 The kernel verifies that the amount of data being copied doesn't exceed the size
 of the destination buffer, preventing buffer overflows and potential code
 execution exploits.
-- *Prohibited access to certain memory regions* <br>
+- **Prohibited access to certain memory regions**
 The kernel might restrict copying data to certain sensitive memory regions,
 enhancing security and protecting against data corruption.
 
-You can find a brief history of efforts and discussions that have been made [here](https://lwn.net/Articles/695991/). Also, there is a full changelog and history of the changes in the Linux source code available [here](https://lore.kernel.org/lkml/20170628165520.GA129364@gmail.com/t/) and [here](https://groups.google.com/g/linux.kernel/c/y9Dgu5HD1bg?pli=1).
+You can find a brief history of efforts and discussions that have been made
+[here](https://lwn.net/Articles/695991/). Also, there is a full changelog and
+history of the changes in the Linux source code available
+[here](https://lore.kernel.org/lkml/20170628165520.GA129364@gmail.com/t/) and
+[here](https://groups.google.com/g/linux.kernel/c/y9Dgu5HD1bg?pli=1).
 
 
-Before start investigating the source code for this patch, let's have an introduction to user space and kernel space.
+Before start investigating the source code for this patch, let's have an
+introduction to user space and kernel space.
 
 
 - **User Space**
-User space is the memory area where user-level applications and processes run. This is where most of the user's programs, such as web browsers, text editors, games, and other applications, execute. User space applications interact directly with the user and handle various tasks based on the user's input.
-In user space, programs are executed in a restricted environment with limited privileges. This means they cannot access or modify critical system resources directly, such as hardware devices or low-level system memory. Instead, they have to make system calls to the operating system kernel to request access to these resources.
-User space offers better isolation between different applications, ensuring that a malfunction or crash in one program does not affect others. It also provides a level of security, as user space processes are unable to compromise the integrity of the operating system or other processes directly.
+User space is the memory area where user-level applications and processes run.
+This is where most of the user's programs, such as web browsers, text editors,
+games, and other applications, execute. User space applications interact
+directly with the user and handle various tasks based on the user's input. In
+user space, programs are executed in a restricted environment with limited
+privileges. This means they cannot access or modify critical system resources
+directly, such as hardware devices or low-level system memory. Instead, they
+have to make system calls to the operating system kernel to request access to
+these resources. User space offers better isolation between different
+applications, ensuring that a malfunction or crash in one program does not
+affect others. It also provides a level of security, as user space processes are
+unable to compromise the integrity of the operating system or other processes
+directly.
 
 - **Kernel Space**
-Kernel space, also known as supervisor mode or system space, is a privileged memory area reserved for the operating system's core functions. It contains the kernel, which is the heart of the operating system responsible for managing hardware, memory, file systems, and various system services.
-The kernel operates at a higher privilege level than user space processes. It has direct access to system resources, hardware, and low-level memory. This access allows it to perform critical tasks that require deep system integration, such as controlling device drivers, managing memory, scheduling processes, and handling interrupts.
-Since the kernel operates at a higher privilege level, it must be protected from user space processes to maintain system stability and security. Accidental or malicious access to kernel space by user space applications could lead to system crashes, data corruption, or security breaches. Therefore, modern operating systems implement mechanisms, such as memory protection, to prevent unauthorized access from user space to kernel space.
+Kernel space, also known as supervisor mode or system space, is a privileged
+memory area reserved for the operating system's core functions. It contains the
+kernel, which is the heart of the operating system responsible for managing
+hardware, memory, file systems, and various system services. The kernel operates
+at a higher privilege level than user space processes. It has direct access to
+system resources, hardware, and low-level memory. This access allows it to
+perform critical tasks that require deep system integration, such as controlling
+device drivers, managing memory, scheduling processes, and handling interrupts.
+Since the kernel operates at a higher privilege level, it must be protected from
+user space processes to maintain system stability and security. Accidental or
+malicious access to kernel space by user space applications could lead to system
+crashes, data corruption, or security breaches. Therefore, modern operating
+systems implement mechanisms, such as memory protection, to prevent unauthorized
+access from user space to kernel space.
 
-In summary, user space is the area where user-level applications run, operating in a restricted environment with limited privileges, while kernel space is a privileged area where the core operating system functions execute, having direct access to system resources. The separation of these two spaces is essential for maintaining system stability, security, and isolation between user-level processes and the operating system itself.
+In summary, user space is the area where user-level applications run, operating
+in a restricted environment with limited privileges, while kernel space is a
+privileged area where the core operating system functions execute, having direct
+access to system resources. The separation of these two spaces is essential for
+maintaining system stability, security, and isolation between user-level
+processes and the operating system itself.
 
 
 ## Reading the Kernel Sources
@@ -114,32 +145,116 @@ executed in the following order:
 the end of memory (i.e.: `ptr + (n - 1) < ptr`), if the pointer is NULL or
 zero-sized.
 
+```c
+static inline void check_bogus_address(const unsigned long ptr, unsigned long n, bool to_user)
+{
+	/* Reject if object wraps past end of memory. */
+	if (ptr + (n - 1) < ptr)
+		usercopy_abort("wrapped address", NULL, to_user, 0, ptr + n);
+
+	/* Reject if NULL or ZERO-allocation. */
+	if (ZERO_OR_NULL_PTR(ptr))
+		usercopy_abort("null address", NULL, to_user, ptr, n);
+}
+```
+
 `check_stack_object` performs a check and returns one of the four possible
 results:
+`NOT_STACK`: not at all on the stack
+`GOOD_FRAME`: fully within a valid stack frame
+`GOOD_STACK`: within the current stack (when can't frame-check exactly)
+`BAD_STACK`: error condition (invalid stack position or bad stack frame)
+
 ```c
-/*
- * ...
- *
- * Returns:
- *  NOT_STACK: not at all on the stack
- *  GOOD_FRAME: fully within a valid stack frame
- *  GOOD_STACK: within the current stack (when can't frame-check exactly)
- *  BAD_STACK: error condition (invalid stack position or bad stack frame)
- */
+static noinline int check_stack_object(const void *obj, unsigned long len)
+{
+    const void * const stack = task_stack_page(current);
+    const void * const stackend = stack + THREAD_SIZE;
+    int ret;
+
+    /***/
+}
+
 ```
 It accesses `task_stack_page` to get the size of the current thread, and first
 check if the pointer is actually pointing inside the stack. If not, it returns
-`NOT_STACK`. `BAD_STACK` is returned if the object partially overlaps. And
-optionally, if the information is available in the current architecture, it
-performs a check on the stack frame. It is specifically implemented and improved
-in the [x86](https://lwn.net/Articles/697545/) architecture to enhance the
-completeness of the check. Interestingly, the only other modern architecture
+`NOT_STACK`.
+```c
+
+static noinline int check_stack_object(const void *obj, unsigned long len)
+{
+    /***/
+
+    /* Object is not on the stack at all. */
+    if (obj + len <= stack || stackend <= obj)
+        return NOT_STACK;
+
+    /**/
+}
+
+```
+
+`BAD_STACK` is returned if the object partially overlaps. And optionally, if the
+information is available in the current architecture, it performs a check on the
+stack frame. It is specifically implemented and improved in the
+[x86](https://lwn.net/Articles/697545/) architecture to enhance the completeness
+of the check. Interestingly, the only other modern architecture
 that supports this at the time of writing is powerpc. There was a
 [complaint](https://www.openwall.com/lists/kernel-hardening/2020/08/18/1) about
-this in 2020. Another optional check depends on
+this in 2020.
+
+```c
+static noinline int check_stack_object(const void *obj, unsigned long len)
+{
+    /***/
+
+    /*
+    * Reject: object partially overlaps the stack (passing the
+    * check above means at least one end is within the stack,
+    * so if this check fails, the other end is outside the stack).
+    */
+    if (obj < stack || stackend < obj + len)
+        return BAD_STACK;
+
+    /* Check if object is safely within a valid frame. */
+    ret = arch_within_stack_frames(stack, stackend, obj, len);
+    if (ret)
+        return ret;
+
+    /***/
+}
+```
+
+
+Another optional check depends on
 `CONFIG_ARCH_HAS_CURRENT_STACK_POINTER` (enabled on mips) when the stack frame
 check is not available. It works by merely checking if the address is on the
 stack.
+
+```c
+static noinline int check_stack_object(const void *obj, unsigned long len)
+{
+    /***/
+
+    /* Finally, check stack depth if possible. */
+#ifdef CONFIG_ARCH_HAS_CURRENT_STACK_POINTER
+    if (IS_ENABLED(CONFIG_STACK_GROWSUP)) {
+        if ((void *)current_stack_pointer < obj + len)
+            return BAD_STACK;
+    } else {
+        if (obj < (void *)current_stack_pointer)
+            return BAD_STACK;
+    }
+#endif
+
+    /***/
+}
+```
+
+If none of above conditions are met, it will return `GOOD_STACK` which means the
+object is placed within the current stack but it doesn't tell anything about the
+frame-check.
+
 
 `check_heap_object` first checks if the address is within a high-memory page
 that is temporarily mapped to the kernel virtual memory. It then checks if the
