@@ -78,7 +78,7 @@ processes and the operating system itself.
 To understand how it works, we read through the implementation in aid of the
 text linked above.
 
-**Configuration**
+### Configuration
 
 Let's first look at how the configuration `CONFIG_HARDENED_USERCOPY` enables the
 check in linux-6.4.8.
@@ -91,7 +91,7 @@ likely to be false. So to utilize branch prediction,
 `static_branch_unlikely(&bypass_usercopy_checks)` is used in the condition that
 determines if the check is needed in `__check_object_size`.
 
-**Implementation in the Kernel Headers**
+### Implementation in the Kernel Headers
 
 Before we dig into the implementation of the checks themselves, let's see how
 and where the checks are utilized. `__check_object_size` handles all the checks
@@ -115,6 +115,7 @@ This makes the checks available to all architectures, and each architecture only
 needs to implement the `raw_copy_{to,from}_user` functions, which is wrapped by
 the checks.
 
+#### `check_object_size`
 `check_object_size` is a very thin wrapper on top of `__check_object_size`, with
 an optimization that skips the check if `n`, the size of the memory object, is
 constant and known during compilation. This exempts trusted calls from overflow
@@ -128,8 +129,9 @@ the architecture. Note that `check_copy_size` is also used in
 functions that copy data to the kernel-space memory, so it makes sense to do the
 boundary checks there as well.
 
-**Logistics of the checks**
+### Logistics of the checks
 
+#### `__check_object_size`
 `__check_object_size` takes a pointer `ptr` inside the kernel-space memory, the
 size `n` of the object to be copied, and a flag `to_user` indicating the
 direction of the copy. As of 6.4.8, four checks are implemented. They are
@@ -139,6 +141,7 @@ executed in the following order:
 - `check_heap_object`
 - `check_kernel_text_object`
 
+#### `check_bogus_address`
 `check_bogus_address` is obvious. It checks if the given pointer wraps around
 the end of memory (i.e.: `ptr + (n - 1) < ptr`), if the pointer is NULL or
 zero-sized.
@@ -156,7 +159,8 @@ static inline void check_bogus_address(const unsigned long ptr, unsigned long n,
 }
 ```
 
-`check_stack_object` performs a check and returns one of the four possible
+#### `check_stack_object`
+`check_stack_object` performs a check and returns one of the four possible 
 results:
 `NOT_STACK`: not at all on the stack
 `GOOD_FRAME`: fully within a valid stack frame
@@ -253,7 +257,7 @@ If none of above conditions are met, it will return `GOOD_STACK` which means the
 object is placed within the current stack but it doesn't tell anything about the
 frame-check.
 
-
+#### `check_heap_object`
 `check_heap_object` first checks if the address is within a high-memory page
 that is temporarily mapped to the kernel virtual memory. It then checks if the
 address is allocated via `vmalloc`, which allocates virtually contiguous
@@ -278,7 +282,7 @@ motive:
 > allocator, the patches will test that it is either within a single or compound
 > page and that it does not span independently allocated pages.
 
-
+#### `check_kernel_text_object`
 `check_kernel_text_object` is the final check that is performed. It first
 determines if the object overlaps with the kernel text. Given the start
 (`_stext`) and end (`_etext`) location of the kernel text, the check is
@@ -296,9 +300,72 @@ straightforward. Additionally, there is a caveat explained in the comments:
 When this is the case, the same check is performed, but on the secondary
 mapping.
 
-**Error handling**
+
+Now that we have basic knowledge about how object size checks are performed,
+let's investigate the kernel's source code and dig into details. before
+continueing, it would be a good idea to read
+[this](https://developer.ibm.com/articles/l-kernel-memory-access/) article about
+memory management in kernel to have a gerenal idea about this concept.
+
+
+#### `copy_from_user`
+`copy_from_user` is a wrapper around `_copy_from_user` which performs validation on object being copied
+
+```c
+static __always_inline unsigned long __must_check
+copy_from_user(void *to, const void __user *from, unsigned long n)
+{
+	if (check_copy_size(to, n, false))
+		n = _copy_from_user(to, from, n);
+	return n;
+}
+```
+The function first checks whether the size of the copy operation is valid using
+the `check_copy_size` function. If the size is valid, the function proceeds;
+otherwise, it might indicate an error. If the size is valid, the function
+performs the actual copy operation using the `_copy_from_user` function, which
+copies n bytes of data from the from pointer (user-space memory) to the to
+pointer (kernel-space memory).
+
+
+`check_copy_size` is responsible for checking the validity of a memory copy
+operation by assessing the size of the copy. The function first attempts to
+determine the size of the object pointed to by addr using the
+`__builtin_object_size` intrinsic. This helps in checking whether the size of
+the memory being copied is within bounds.
+```c
+static __always_inline __must_check bool
+check_copy_size(const void *addr, size_t bytes, bool is_source)
+{
+	int sz = __builtin_object_size(addr, 0);
+	if (unlikely(sz >= 0 && sz < bytes)) {
+		if (!__builtin_constant_p(bytes))
+			copy_overflow(sz, bytes);
+		else if (is_source)
+			__bad_copy_from();
+		else
+			__bad_copy_to();
+		return false;
+	}
+	if (WARN_ON_ONCE(bytes > INT_MAX))
+		return false;
+	check_object_size(addr, bytes, is_source);
+	return true;
+}
+```
+
+The function then calls [`check_object_size`](#check_object_size) to perform
+additional size checks based on the addr and bytes.
+
+
+### Error handling
 
 There is a helper function named `usercopy_abort`, whose responsibility is
 printing an emergency-level message noting the out-of-bounds access, and call
 [`BUG()`](https://kernelnewbies.org/FAQ/BUG) to indicate that something is
 seriously wrong and kill the process.
+
+
+
+
+**Performance overhead**
