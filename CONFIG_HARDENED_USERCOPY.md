@@ -358,7 +358,11 @@ check_copy_size(const void *addr, size_t bytes, bool is_source)
 The function then calls [`check_object_size`](#check_object_size) to perform
 additional size checks based on the addr and bytes.
 
-#### `_copy_from_user` and `__copy_from_user`
+#### `_copy_from_user` & `__copy_from_user`
+
+The functions _copy_from_user and __copy_from_user are both used to copy data
+from user space to kernel space. However, they have some differences in terms of
+usage and behavior.
 
 ```c
 static inline __must_check unsigned long
@@ -377,6 +381,15 @@ _copy_from_user(void *to, const void __user *from, unsigned long n)
 }
 ```
 
+`_copy_from_user` is a safer version of the copy_from_user function. It performs
+certain safety checks to ensure that the copy operation does not cause security
+vulnerabilities or memory corruption. It includes additional checks to validate
+the user space memory and ensure that the requested memory range is accessible
+and readable. If the memory is not accessible, it will return the number of
+bytes that could not be copied. `_copy_from_user` is designed to be used in
+situations where you want to avoid potential security vulnerabilities, as it
+performs these extra checks.
+
 ```c
 static __always_inline __must_check unsigned long
 __copy_from_user(void *to, const void __user *from, unsigned long n)
@@ -394,7 +407,19 @@ __copy_from_user(void *to, const void __user *from, unsigned long n)
 }
 ```
 
+`__copy_from_user` is a lower-level version of the copy_from_user function. It
+performs a simple memory copy operation without the additional security checks
+and validation that `_copy_from_user` provides. It's considered a more "raw" or
+"direct" form of memory copy, and as a result, it might not provide the same
+level of safety checks as `_copy_from_user`. `__copy_from_user` is generally
+used in scenarios where the code has already ensured the validity of the user
+space memory, and the extra checks provided by `_copy_from_user` are not needed.
 
+The key difference is in how they handle the case when the copy operation
+encounters an error. In the `__copy_from_user` version, there's no provision to
+fill the destination buffer with zeros if an error occurs. In the
+`_copy_from_user` version, it zeros out the remaining bytes of the destination
+buffer if the copy operation was not fully successful.
 
 ### Error handling
 
