@@ -129,6 +129,18 @@ the architecture. Note that `check_copy_size` is also used in
 functions that copy data to the kernel-space memory, so it makes sense to do the
 boundary checks there as well.
 
+
+### Overall Flow
+
+<!-- todo: use diagrams to describe the overall flow -->
+
+### Data Structures
+
+#### Folio
+
+<!-- todo: add description and code -->
+
+
 ### Logistics of the checks
 
 #### `__check_object_size`
