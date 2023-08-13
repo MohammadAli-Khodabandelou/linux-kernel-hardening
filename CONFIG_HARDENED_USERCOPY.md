@@ -328,6 +328,7 @@ copies n bytes of data from the from pointer (user-space memory) to the to
 pointer (kernel-space memory).
 
 
+#### `check_copy_size`
 `check_copy_size` is responsible for checking the validity of a memory copy
 operation by assessing the size of the copy. The function first attempts to
 determine the size of the object pointed to by addr using the
@@ -356,6 +357,43 @@ check_copy_size(const void *addr, size_t bytes, bool is_source)
 
 The function then calls [`check_object_size`](#check_object_size) to perform
 additional size checks based on the addr and bytes.
+
+#### `_copy_from_user` and `__copy_from_user`
+
+```c
+static inline __must_check unsigned long
+_copy_from_user(void *to, const void __user *from, unsigned long n)
+{
+	unsigned long res = n;
+	might_fault();
+	if (!should_fail_usercopy() && likely(access_ok(from, n))) {
+		instrument_copy_from_user_before(to, from, n);
+		res = raw_copy_from_user(to, from, n);
+		instrument_copy_from_user_after(to, from, n, res);
+	}
+	if (unlikely(res))
+		memset(to + (n - res), 0, res);
+	return res;
+}
+```
+
+```c
+static __always_inline __must_check unsigned long
+__copy_from_user(void *to, const void __user *from, unsigned long n)
+{
+	unsigned long res;
+
+	might_fault();
+	instrument_copy_from_user_before(to, from, n);
+	if (should_fail_usercopy())
+		return n;
+	check_object_size(to, n, false);
+	res = raw_copy_from_user(to, from, n);
+	instrument_copy_from_user_after(to, from, n, res);
+	return res;
+}
+```
+
 
 
 ### Error handling
