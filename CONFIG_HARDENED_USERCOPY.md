@@ -136,6 +136,543 @@ boundary checks there as well.
 
 ### Data Structures
 
+#### Page
+
+As mentioned before, memory management in Linux kernel in done using pages. A
+page, is a basic unit of physical memory with the typical size of 4096 bytes.
+let's have a look on `page` struct.
+
+
+The following lines are pulled from letest version of the kernel which is
+[6.4.11](https://elixir.bootlin.com/linux/v6.4.11/source/include/linux/mm_types.h#L74)
+by the time of writing this document. 
+
+```c
+struct page {
+	unsigned long flags;		/* Atomic flags, some possibly
+								* updated asynchronously */
+```
+
+The first thing you see is the `flags` variable. You can find available values
+for `flags` and detailed documentation
+[here](https://elixir.bootlin.com/linux/v6.4.11/source/include/linux/page-flags.h)
+
+
+
+After flags, there is a quite large union inside the `page` struct. This union
+allows the struct `page` to represent different types of pages. Depending on the
+type of page, different fields within this union will be used. Each comment
+block inside the union represents a different type of page and its associated
+fields.
+
+```c
+	/*
+	 * Five words (20/40 bytes) are available in this union.
+	 * WARNING: bit 0 of the first word is used for PageTail(). That
+	 * means the other users of this union MUST NOT use the bit to
+	 * avoid collision and false-positive PageTail().
+	 */
+	union {
+		struct {	/* Page cache and anonymous pages */
+			/***/
+		};
+		struct {	/* page_pool used by netstack */
+			/***/
+		};
+		struct {	/* Tail pages of compound page */
+			/***/
+		};
+		struct {	/* Page table pages */
+			/***/
+		};
+		struct {	/* ZONE_DEVICE pages */
+			/***/
+		};
+
+		/** @rcu_head: You can use this to free a page by RCU. */
+		struct rcu_head rcu_head;
+	};
+```
+
+This block represents pages used in the page cache and anonymous pages. Page
+cache pages typically hold data read from or to be written to disk, while
+anonymous pages are used for anonymous memory mappings like stack or heap.
+
+```c
+		struct {	/* Page cache and anonymous pages */
+			/**
+			* @lru: Pageout list, e.g., active_list protected by
+			* lruvec->lru_lock.  Sometimes used as a generic list
+			* by the page owner.
+			*/
+			union {
+				struct list_head lru;
+
+				/* Or, for the Unevictable "LRU list" slot */
+				struct {
+					/* Always even, to negate PageTail */
+					void *__filler;
+					/* Count page's or folio's mlocks */
+					unsigned int mlock_count;
+				};
+
+				/* Or, free page */
+				struct list_head buddy_list;
+				struct list_head pcp_list;
+			};
+			/* See page-flags.h for PAGE_MAPPING_FLAGS */
+			struct address_space *mapping;
+			union {
+				pgoff_t index;      /* Our offset within mapping. */
+				unsigned long share; /* share count for fsdax */
+			};
+			/**
+			* @private: Mapping-private opaque data.
+			* Usually used for buffer_heads if PagePrivate.
+			* Used for swp_entry_t if PageSwapCache.
+			* Indicates order in the buddy system if PageBuddy.
+			*/
+			unsigned long private;
+		};
+```
+
+The following union is used to represent different lists that this page can be a part of.
+Depending on the situation, one of these unions' members will be active.
+
+```c
+			/**
+			 * @lru: Pageout list, eg. active_list protected by
+			 * lruvec->lru_lock.  Sometimes used as a generic list
+			 * by the page owner.
+			 */
+			union {
+				struct list_head lru;
+
+				/* Or, for the Unevictable "LRU list" slot */
+				struct {
+					/* Always even, to negate PageTail */
+					void *__filler;
+					/* Count page's or folio's mlocks */
+					unsigned int mlock_count;
+				};
+
+				/* Or, free page */
+				struct list_head buddy_list;
+				struct list_head pcp_list;
+			};
+```
+
+`struct list_head lru`: Represents the LRU (Least Recently Used) list, which is
+often used for pages that can be paged out to secondary storage when memory is
+low. The comment mentions that it's protected by lruvec->lru_lock.
+
+
+`struct { /* Unevictable "LRU list" slot */ }`: This part is for pages that are
+considered "unevictable" and are placed in an LRU list slot. The `__filler` is
+used to negate `PageTail`, and `mlock_count` is a count of mlocks (memory locks)
+on the page.
+
+`struct list_head buddy_list` and `struct list_head pcp_list`: These are lists
+used for free pages in the memory buddy system. The buddy system is a memory
+allocation algorithm that manages memory in blocks of powers of 2. These lists
+are used to keep track of free pages.
+
+
+```c
+			/* See page-flags.h for PAGE_MAPPING_FLAGS */
+			struct address_space *mapping;
+			union {
+				pgoff_t index;		/* Our offset within mapping. */
+				unsigned long share;	/* share count for fsdax */
+			};
+```
+
+`struct address_space *mapping`: This field points to the address space
+structure associated with the page. An address space represents a mapping
+between virtual memory and some underlying storage, often used for file-backed
+memory mappings.
+
+`union` within the block: This union represents two different ways of
+representing an index or share count for the page, depending on the context.
+
+`pgoff_t index`: Represents the offset of the page within the mapping. This is
+typically used to locate the page's position within a file.
+
+`unsigned long share`: Represents the share count for fsdax (file system-direct
+access) pages. This is relevant when memory-mapped files are accessed without
+copying data to user space.
+
+
+
+```c
+			/**
+			 * @private: Mapping-private opaque data.
+			 * Usually used for buffer_heads if PagePrivate.
+			 * Used for swp_entry_t if PageSwapCache.
+			 * Indicates order in the buddy system if PageBuddy.
+			 */
+			unsigned long private;
+```
+
+`unsigned long private`: This field is a catch-all for mapping-private opaque
+data. Its specific usage depends on various page flags like `PagePrivate`,
+`PageSwapCache`, and `PageBuddy`. It might be used, for example, for storing
+buffer_heads if `PagePrivate`, or for swp_entry_t if `PageSwapCache`, or to
+indicate the order in the buddy system if PageBuddy.
+
+
+
+
+
+```c
+		struct { /* page_pool used by netstack */
+			/**
+			* @pp_magic: magic value to avoid recycling non
+			* page_pool allocated pages.
+			*/
+			unsigned long pp_magic;
+			struct page_pool *pp;
+			unsigned long _pp_mapping_pad;
+			unsigned long dma_addr;
+			union {
+				/**
+				* dma_addr_upper: might require a 64-bit
+				* value on 32-bit architectures.
+				*/
+				unsigned long dma_addr_upper;
+				/**
+				* For frag page support, not supported in
+				* 32-bit architectures with 64-bit DMA.
+				*/
+				atomic_long_t pp_frag_count;
+			};
+		};
+```
+
+This part of the union represents pages that are used as part of a page pool in
+the context of networking (netstack). Here's an explanation of its components:
+
+
+`unsigned long pp_magic`: This field stores a magic value used to avoid
+recycling pages that were not allocated from the page pool. This magic value
+helps ensure that only pages allocated for this specific purpose are managed
+within the page pool.
+
+`struct page_pool *pp`: This field is a pointer to a page pool structure. Page
+pools are commonly used in networking to efficiently manage memory for
+network-related operations. They provide a way to allocate and deallocate memory
+chunks quickly.
+
+`unsigned long _pp_mapping_pad`: This field seems to be reserved or used as
+padding and might not be actively used in this context.
+
+`unsigned long dma_addr`: This field likely stores a DMA (Direct Memory Access)
+address associated with the page. DMA is a technique used in computers to allow
+peripheral devices to access memory without involving the CPU. This field may be
+used for efficient data transfer between devices.
+
+
+union within the block: This union represents two different ways of storing
+information depending on the context.
+
+`unsigned long dma_addr_upper`: This field may store the upper bits of the DMA
+address. On 32-bit architectures with 64-bit DMA addresses, this is necessary to
+represent the full address.
+
+`atomic_long_t pp_frag_count`: This field appears to be related to fragmentation
+page support. Fragmentation can occur when memory is allocated and deallocated
+in smaller chunks, leaving gaps in memory. This field may be used to track the
+fragmentation count, possibly to manage and defragment memory efficiently.
+
+
+
+
+```c
+		struct { /* Tail pages of compound page */
+			unsigned long compound_head; /* Bit zero is set */
+		};
+```
+
+This field stores information about the compound head of a compound page.
+Compound pages are a memory management concept used in the Linux kernel. They
+consist of a "head" page and a series of "tail" pages.
+
+The `compound_head` field stores information about the head page of a compound
+page. Compound head pages are used to manage memory allocations where multiple
+physically contiguous pages are treated as a single logical unit. Bit zero of
+this field is set, which can be used to distinguish compound head pages from
+tail pages.
+
+In a compound page, the head page contains control information, and the tail
+pages hold the actual data. The `compound_head` field is used to identify the head
+page and manage the relationship between the head and tail pages within a
+compound page.
+
+
+```c
+		struct { /* Page table pages */
+			unsigned long _pt_pad_1;     /* compound_head */
+			pgtable_t pmd_huge_pte;      /* protected by page->ptl */
+			unsigned long _pt_pad_2;     /* mapping */
+			union {
+				struct mm_struct *pt_mm;  /* x86 pgds only */
+				atomic_t pt_frag_refcount; /* powerpc */
+			};
+		#if ALLOC_SPLIT_PTLOCKS
+			spinlock_t *ptl;
+		#else
+			spinlock_t ptl;
+		#endif
+		};
+```
+
+This part of the union is related to pages used for managing page tables, a
+fundamental aspect of virtual memory management in an operating system. Here's
+an explanation of its components:
+
+`unsigned long _pt_pad_1`: This field appears to be reserved or used as padding
+and might not be actively used in this context.
+
+`pgtable_t pmd_huge_pte`: This field is related to page table management and
+represents a pointer to the page middle directory (PMD) huge page table entry
+(PTE). It is protected by the page->ptl spinlock, indicating that access to this
+field must be synchronized to prevent concurrent modifications.
+
+`unsigned long _pt_pad_2`: Similar to _pt_pad_1, this field seems to be reserved
+or used as padding and might not be actively used in this context.
+
+union within the block: This union represents two different ways of storing
+information depending on the architecture and context.
+
+`struct mm_struct *pt_mm` (x86 pgds only): This field is used on x86
+architecture for page table management. It stores a pointer to the memory
+management structure (struct mm_struct) associated with the page. The memory
+management structure keeps track of the virtual memory mappings for a particular
+process.
+
+`atomic_t pt_frag_refcount` (powerpc): On powerpc architecture, this field
+represents an atomic reference count used for page table fragmentation
+management. It is used to keep track of references to fragmented page tables.
+
+Conditional compilation (`#if` and `#else`): Depending on the value of the
+`ALLOC_SPLIT_PTLOCKS` macro, this code block includes either a pointer to a
+spinlock (`spinlock_t *ptl`) or an actual spinlock (`spinlock_t ptl`) for page
+table locking. Spinlocks are synchronization primitives used to protect critical
+sections of code from concurrent execution.
+
+
+
+```c
+		struct { /* ZONE_DEVICE pages */
+			/** @pgmap: Points to the hosting device page map. */
+			struct dev_pagemap *pgmap;
+			void *zone_device_data;
+			/*
+			* ZONE_DEVICE private pages are counted as being
+			* mapped so the next 3 words hold the mapping, index,
+			* and private fields from the source anonymous or
+			* page cache page while the page is migrated to device
+			* private memory.
+			* ZONE_DEVICE MEMORY_DEVICE_FS_DAX pages also
+			* use the mapping, index, and private fields when
+			* pmem backed DAX files are mapped.
+			*/
+		};
+```
+
+This part of the union is related to pages that belong to the ZONE_DEVICE memory
+zone, a concept used in memory management, especially for device-specific
+memory. Here's an explanation of its components:
+
+`struct dev_pagemap *pgmap`: This field points to the hosting device page map,
+represented by a struct dev_pagemap. A device page map is a data structure used
+to manage memory pages that are specific to a particular device or memory zone.
+
+`void *zone_device_data`: This field appears to be a pointer to device-specific
+data associated with the page or the `ZONE_DEVICE` memory zone. It's a
+general-purpose pointer and its exact usage may depend on the specific device or
+memory management requirements.
+
+
+```c
+		/** @rcu_head: You can use this to free a page by RCU. */
+		struct rcu_head rcu_head;
+```
+
+`struct rcu_head rcu_head`: This field is of type struct rcu_head. It is part of
+the Linux kernel's RCU (Read-Copy-Update) mechanism, which is a synchronization
+technique used to safely and efficiently manage data structures that can be read
+by multiple threads while being occasionally modified.
+
+In the context of memory management, the `rcu_head` structure is used to mark
+pages that are scheduled for deallocation using RCU. Instead of immediately
+freeing a page when it's no longer needed, the RCU mechanism allows the page to
+be reclaimed more efficiently in a deferred manner.
+
+When a page needs to be freed, it is marked with an `rcu_head`, and the actual
+freeing of the page is deferred until it is safe to do so. RCU ensures that no
+threads are actively using the page before it is freed, preventing data races
+and memory corruption.
+
+Developers can use this rcu_head field to enqueue a page for RCU-based freeing
+when it is no longer needed, providing a safe and efficient way to manage memory
+in a multithreaded environment.
+
+
+```c
+	union { /* This union is 4 bytes in size. */
+		/*
+		* If the page can be mapped to userspace, encodes the number
+		* of times this page is referenced by a page table.
+		*/
+		atomic_t _mapcount;
+
+		/*
+		* If the page is neither PageSlab nor mappable to userspace,
+		* the value stored here may help determine what this page
+		* is used for.  See page-flags.h for a list of page types
+		* which are currently stored here.
+		*/
+		unsigned int page_type;
+	};
+```
+
+This part of the union represents two different ways of storing information
+based on the context and requirements of the struct page. Here's the
+explanation:
+
+`atomic_t _mapcount`: This field is of type `atomic_t`, which represents an
+atomic integer. It is used to store the reference count for the page when the
+page can be mapped to userspace. The reference count indicates the number of
+times this page is currently referenced by page tables.
+
+When a page is mapped to userspace, multiple page tables or mappings may
+reference it, and this mapcount helps track how many such references exist. It's
+essential for proper memory management, especially in a multi-threaded or
+multi-process environment.
+
+`unsigned int page_type`: This field is used when the page is neither a slab
+page nor mappable to userspace. Instead, it stores a value that may help
+determine the purpose or type of this page.
+
+The comment suggests that this field can be used to identify the type of the
+page based on certain page flags. The page-flags.h header file in the Linux
+kernel contains a list of page types, and this field could potentially store an
+identifier corresponding to one of these types.
+
+This field is useful for distinguishing various types of pages in the kernel's
+memory management system, even when they are not actively mapped to userspace.
+It allows for efficient management and identification of different page types
+within the kernel.
+
+
+```c
+	/* Usage count. *DO NOT USE DIRECTLY*. See page_ref.h */
+	atomic_t _refcount;
+```
+
+The `atomic_t` _refcount field is responsible for tracking the usage count of a
+page, but it should not be manipulated directly. Instead, developers should rely
+on functions and macros provided in `page_ref.h` to ensure safe and consistent
+reference counting, preventing memory management issues in the kernel.
+
+
+
+
+```c
+#ifdef CONFIG_MEMCG
+	unsigned long memcg_data;
+#endif
+```
+
+This code block is conditional and depends on whether the kernel configuration
+has enabled memory control group (memcg) support (`CONFIG_MEMCG`).
+
+If memcg support is enabled, this unsigned long field named `memcg_data` is
+present. Memcg is a kernel feature that allows for fine-grained memory resource
+management, often used in containerization environments like Docker. This field
+likely holds some data or information related to memory control groups.
+
+
+```c
+	/*
+	 * On machines where all RAM is mapped into kernel address space,
+	 * we can simply calculate the virtual address. On machines with
+	 * highmem some memory is mapped into kernel virtual memory
+	 * dynamically, so we need a place to store that address.
+	 * Note that this field could be 16 bits on x86 ... ;)
+	 *
+	 * Architectures with slow multiplication can define
+	 * WANT_PAGE_VIRTUAL in asm/page.h
+	 */
+#if defined(WANT_PAGE_VIRTUAL)
+	void *virtual;			/* Kernel virtual address (NULL if
+					   not kmapped, ie. highmem) */
+#endif /* WANT_PAGE_VIRTUAL */
+```
+
+This comment block discusses the handling of virtual addresses for pages,
+particularly in systems with high memory (highmem). In some systems, all RAM is
+mapped into the kernel address space, so virtual addresses can be easily
+calculated. However, in systems with highmem, some memory is mapped into the
+kernel virtual memory dynamically.
+
+To accommodate this situation, a field named `virtual` is provided, which holds
+the kernel virtual address for the page. This field can be used to store the
+virtual address of the page when it is mapped into the kernel's address space.
+
+It also mentions that on certain architectures (like x86), this field could
+potentially be 16 bits in size, which means it might have limited capacity for
+storing virtual addresses.
+
+The comment also mentions the `WANT_PAGE_VIRTUAL` macro, which can be defined in
+`asm/page.h`. This macro is related to architectures with slow multiplication
+and likely affects how the virtual address is calculated or stored.
+
+
+```c
+#ifdef CONFIG_KMSAN
+	/*
+	 * KMSAN metadata for this page:
+	 *  - shadow page: every bit indicates whether the corresponding
+	 *    bit of the original page is initialized (0) or not (1);
+	 *  - origin page: every 4 bytes contain an id of the stack trace
+	 *    where the uninitialized value was created.
+	 */
+	struct page *kmsan_shadow;
+	struct page *kmsan_origin;
+#endif
+```
+
+If Kernel Memory Sanitizer (KMSAN) support is enabled, this part of the struct includes two fields:
+
+`struct page *kmsan_shadow`: This field points to a "shadow page" associated
+with the original page. The shadow page is used by KMSAN to track the
+initialization state of individual bits in the original page. Each bit in the
+shadow page corresponds to a bit in the original page, indicating whether it has
+been initialized (0) or not (1).
+
+`struct page *kmsan_origin`: This field points to an "origin page." For
+uninitialized memory, KMSAN keeps track of where the uninitialized value was
+created. This field points to a page that contains stack trace IDs, allowing
+developers to trace back to the source of uninitialized memory.
+
+
+```c
+#ifdef LAST_CPUPID_NOT_IN_PAGE_FLAGS
+	int _last_cpupid;
+#endif
+} _struct_page_alignment;
+```
+
+Once again, this code block is conditional and depends on a specific kernel
+configuration flag (`LAST_CPUPID_NOT_IN_PAGE_FLAGS`).
+
+If this flag is defined, an integer field named `_last_cpupid` is included. It
+appears to be related to tracking the last CPU PID (process ID) but might be
+specific to certain configurations or use cases.
+
+
 #### Folio
 
 <!-- todo: add description and code -->
