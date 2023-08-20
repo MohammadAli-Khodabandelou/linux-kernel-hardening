@@ -675,7 +675,114 @@ specific to certain configurations or use cases.
 
 #### Folio
 
-<!-- todo: add description and code -->
+In the Linux kernel's memory management, the fundamental unit is a "page,"
+typically 4,096 bytes in size. This unit is a hardware-level concept, and
+different CPU architectures may offer various page sizes, but a base page size
+(often 4,096 bytes) is chosen. Compound pages, on the other hand, are used for
+various purposes, such as "huge pages" and DMA buffers. These are essentially
+groups of contiguous single pages.
+
+The kernel represents memory pages with structures in the system memory map.
+When compound pages are created, one page structure is marked as the "head
+page," representing the entire compound page, while the others are labeled "tail
+pages" with pointers to the head page.
+
+However, this approach has led to ambiguity in how functions interact with
+different types of pages. Functions that accept page structures as arguments may
+be unclear about whether they should work on a head or tail page, and whether
+they should operate on PAGE_SIZE bytes or the entire compound page. This
+ambiguity could potentially lead to bugs in the kernel.
+
+> A function which has a struct page argument might be expecting a head or base
+> page and will BUG if given a tail page. It might work with any kind of page
+> and operate on PAGE_SIZE bytes. It might work with any kind of page and
+> operate on page_size() bytes if given a head page but PAGE_SIZE bytes if given
+> a base or tail page. It might operate on page_size() bytes if passed a head or
+> tail page. We have examples of all of these today.
+
+To address this issue, Matthew Wilcox introduced the concept of a "page folio."
+A page folio is essentially a page structure that is guaranteed not to be a tail
+page. Functions accepting a folio as an argument are expected to operate on the
+entire compound page, eliminating ambiguity.
+
+The benefits of page folios are twofold. First, they enhance clarity in the
+kernel's memory management subsystem. Second, as functions are converted to
+accept folios, it becomes clear that they work on full compound pages rather
+than tail pages. This helps reduce potential bugs in the kernel's memory
+management.
+
+You can find a more in-depth discussion about the context [here](https://lwn.net/Articles/849538/).
+
+
+```c
+struct folio {
+	/* private: don't document the anon union */
+	union {
+		struct {
+	/* public: */
+			unsigned long flags;
+			union {
+				struct list_head lru;
+	/* private: avoid cluttering the output */
+				struct {
+					void *__filler;
+	/* public: */
+					unsigned int mlock_count;
+	/* private: */
+				};
+	/* public: */
+			};
+			struct address_space *mapping;
+			pgoff_t index;
+			void *private;
+			atomic_t _mapcount;
+			atomic_t _refcount;
+#ifdef CONFIG_MEMCG
+			unsigned long memcg_data;
+#endif
+	/* private: the union with struct page is transitional */
+		};
+		struct page page;
+	};
+	union {
+		struct {
+			unsigned long _flags_1;
+			unsigned long _head_1;
+	/* public: */
+			unsigned char _folio_dtor;
+			unsigned char _folio_order;
+			atomic_t _entire_mapcount;
+			atomic_t _nr_pages_mapped;
+			atomic_t _pincount;
+#ifdef CONFIG_64BIT
+			unsigned int _folio_nr_pages;
+#endif
+	/* private: the union with struct page is transitional */
+		};
+		struct page __page_1;
+	};
+	union {
+		struct {
+			unsigned long _flags_2;
+			unsigned long _head_2;
+	/* public: */
+			void *_hugetlb_subpool;
+			void *_hugetlb_cgroup;
+			void *_hugetlb_cgroup_rsvd;
+			void *_hugetlb_hwpoison;
+	/* private: the union with struct page is transitional */
+		};
+		struct {
+			unsigned long _flags_2a;
+			unsigned long _head_2a;
+	/* public: */
+			struct list_head _deferred_list;
+	/* private: the union with struct page is transitional */
+		};
+		struct page __page_2;
+	};
+};
+```
 
 
 ### Logistics of the checks
