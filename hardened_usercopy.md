@@ -283,6 +283,50 @@ motive:
 > allocator, the patches will test that it is either within a single or compound
 > page and that it does not span independently allocated pages.
 
+```c
+static inline void check_heap_object(const void *ptr, unsigned long n,
+				     bool to_user)
+{
+	unsigned long addr = (unsigned long)ptr;
+	unsigned long offset;
+	struct folio *folio;
+
+	if (is_kmap_addr(ptr)) {
+		offset = offset_in_page(ptr);
+		if (n > PAGE_SIZE - offset)
+			usercopy_abort("kmap", NULL, to_user, offset, n);
+		return;
+	}
+
+	if (is_vmalloc_addr(ptr) && !pagefault_disabled()) {
+		struct vmap_area *area = find_vmap_area(addr);
+
+		if (!area)
+			usercopy_abort("vmalloc", "no area", to_user, 0, n);
+
+		if (n > area->va_end - addr) {
+			offset = addr - area->va_start;
+			usercopy_abort("vmalloc", NULL, to_user, offset, n);
+		}
+		return;
+	}
+
+	if (!virt_addr_valid(ptr))
+		return;
+
+	folio = virt_to_folio(ptr);
+
+	if (folio_test_slab(folio)) {
+		/* Check slab allocator for flags and size. */
+		__check_heap_object(ptr, n, folio_slab(folio), to_user);
+	} else if (folio_test_large(folio)) {
+		offset = ptr - folio_address(folio);
+		if (n > folio_size(folio) - offset)
+			usercopy_abort("page alloc", NULL, to_user, offset, n);
+	}
+}
+```
+
 #### `check_kernel_text_object`
 `check_kernel_text_object` is the final check that is performed. It first
 determines if the object overlaps with the kernel text. Given the start
